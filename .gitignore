@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go build artefacts
+/transcoder
+
+# Debug bundle data (large; not checked in)
+debug/
+*.zip
+artifacts/
+
+# DuckDB verification scratch space
+/tmp/
