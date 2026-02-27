@@ -21,14 +21,14 @@ Optional (for output verification):
 ## Installation
 
 ```bash
-go install github.com/cockroachlabs/trancoder/cmd/transcoder@latest
+go install github.com/Abhinav1299/Transcoder/cmd/transcoder@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/cockroachlabs/trancoder.git
-cd trancoder
+git clone https://github.com/Abhinav1299/Transcoder.git
+cd Transcoder
 go build -o transcoder ./cmd/transcoder
 ```
 
