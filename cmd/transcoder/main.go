@@ -6,12 +6,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
+	"os/signal"
 
-	"github.com/cockroachlabs/trancoder"
+	"github.com/cockroachlabs/transcoder"
 )
 
 func main() {
@@ -24,8 +27,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	t := &transcoder.Transcoder{}
-	stats, err := t.ConvertZIP(*inputPath, *outputPath)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	t := &transcoder.Transcoder{
+		Logger: slog.Default(),
+	}
+	stats, err := t.ConvertZIP(ctx, *inputPath, *outputPath)
 	if err != nil {
 		log.Fatalf("conversion failed: %v", err)
 	}

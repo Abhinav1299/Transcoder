@@ -1,4 +1,4 @@
-module github.com/cockroachlabs/trancoder
+module github.com/cockroachlabs/transcoder
 
 go 1.25.5
 

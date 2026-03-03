@@ -1,10 +1,10 @@
 # transcoder
 
-`transcoder` converts [CockroachDB](https://github.com/cockroachdb/cockroach) debug-bundle log files from plain-text (`crdb-v2` format) into [Apache Parquet](https://parquet.apache.org/), making them queryable with tools like DuckDB, Spark, and pandas.
+`transcoder` converts [CockroachDB](https://github.com/cockroachdb/cockroach) debug-bundle log files from plain-text into [Apache Parquet](https://parquet.apache.org/), making them queryable with tools like DuckDB, Spark, and pandas.
 
 ## Features
 
-- Parses the full `crdb-v2` log format including severity, timestamps, goroutine IDs, channels, tags, tenant details, and redaction markers.
+- Parses all CockroachDB log formats: `crdb-v2`, `crdb-v1`, `json`, `json-compact` (and their `-tty`/`-fluent` variants), with automatic format detection from file headers.
 - Reassembles multi-line entries (continuation markers `+`, `|`, `!`) and attaches non-matching banner lines to their preceding entry.
 - Sanitises invalid UTF-8 bytes so the output is always valid Parquet.
 - Streams log files line-by-line — memory usage stays bounded regardless of file size.
@@ -13,7 +13,7 @@
 
 ## Prerequisites
 
-- **Go 1.22+**
+- **Go 1.22+** (developed with Go 1.25)
 
 Optional (for output verification):
 - [DuckDB](https://duckdb.org/) CLI
@@ -73,26 +73,21 @@ ORDER BY time;
 ## Testing
 
 ```bash
-go test ./...
+make test
 ```
 
-The test suite includes:
+Run benchmarks:
 
-- **Unit tests** (`parser_test.go`) — single-line parsing, multi-line continuations, structured entries, non-matching line attachment, severity/channel/tag extraction.
-- **Integration tests** (`transcoder_test.go`) — end-to-end ZIP conversion with both synthetic and real debug bundles.
+```bash
+make bench
+```
 
 ## Verifying output with DuckDB
 
-A comprehensive verification script is included at `scripts/verify.sql`. It compares the original text logs against the converted Parquet files across 9 checks: per-file counts, totals, file count, schema validation, data quality, severity/channel distributions, timestamp range, and redactable flag.
+A `make verify` target automates end-to-end verification: it builds the binary, converts the input ZIP, extracts both text and Parquet files, and runs `scripts/verify.sql` through DuckDB. The script compares original text logs against converted Parquet files across 9 checks (per-file counts, totals, file count, schema, data quality, severity/channel distributions, timestamp range, and redactable flag).
 
 ```bash
-# 1. Extract both ZIPs
-mkdir -p /tmp/verify/text /tmp/verify/parquet
-unzip -qo debug-bundle.zip '*.log'     -d /tmp/verify/text
-unzip -qo parquet.zip      '*.parquet' -d /tmp/verify/parquet
-
-# 2. Run verification
-duckdb < scripts/verify.sql
+make verify INPUT_ZIP=debug-bundle.zip
 ```
 
 ## Schema

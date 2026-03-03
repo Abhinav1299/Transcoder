@@ -3,6 +3,7 @@ package transcoder
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ I260128 07:00:20.056959 711 15@kv/kvserver/kvstorage/init.go:280 ⋮ [T1,Vsystem
 	})
 
 	tr := &Transcoder{}
-	stats, err := tr.ConvertZIP(inputPath, outputPath)
+	stats, err := tr.ConvertZIP(context.Background(), inputPath, outputPath)
 	if err != nil {
 		t.Fatalf("ConvertZIP failed: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestConvertZIPWithRealBundle(t *testing.T) {
 	outputPath := filepath.Join(tmpDir, "parquet.zip")
 
 	tr := &Transcoder{}
-	stats, err := tr.ConvertZIP(bundlePath, outputPath)
+	stats, err := tr.ConvertZIP(context.Background(), bundlePath, outputPath)
 	if err != nil {
 		t.Fatalf("ConvertZIP failed: %v", err)
 	}

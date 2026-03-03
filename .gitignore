@@ -7,13 +7,16 @@
 *.swp
 *.swo
 
-# Go build artefacts
+# Go build
 /transcoder
 
-# Debug bundle data (large; not checked in)
+# Debug
 debug/
 *.zip
 artifacts/
+debugzips/
+outputs/
+notes.txt
 
 # DuckDB verification scratch space
 /tmp/

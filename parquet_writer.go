@@ -6,9 +6,10 @@ import (
 	"github.com/parquet-go/parquet-go"
 )
 
-// ParquetWriter serialises LogEntry records into Parquet format using Snappy
-// compression. It wraps parquet-go's GenericWriter and exposes a minimal API
-// suited to the transcoder's streaming write pattern.
+// ParquetWriter serialises LogEntry records into Parquet format using Zstd
+// compression with row groups of up to 10,000 rows. It wraps parquet-go's
+// GenericWriter and exposes a minimal API suited to the transcoder's streaming
+// write pattern.
 type ParquetWriter struct {
 	writer *parquet.GenericWriter[LogEntry]
 }
@@ -18,7 +19,8 @@ type ParquetWriter struct {
 // rows and finalise the file footer.
 func NewParquetWriter(w io.Writer) *ParquetWriter {
 	pw := parquet.NewGenericWriter[LogEntry](w,
-		parquet.Compression(&parquet.Snappy),
+		parquet.Compression(&parquet.Zstd),
+		parquet.MaxRowsPerRowGroup(10_000),
 	)
 	return &ParquetWriter{writer: pw}
 }

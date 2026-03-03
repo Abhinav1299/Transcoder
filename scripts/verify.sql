@@ -55,7 +55,7 @@ SELECT
         '\.log$', '') AS base_name,
     count(*) FILTER (
         WHERE regexp_matches(line, '^[IWEF]\d{6} \d{2}:\d{2}:\d{2}\.\d{6} \d+')
-          AND regexp_matches(line, '\] \d* ?[ =]')
+          AND NOT regexp_matches(line, 'config\]')
     ) AS entry_count
 FROM lines
 GROUP BY filename;
