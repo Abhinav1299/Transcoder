@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,6 +44,149 @@ I260128 07:00:20.056959 711 15@kv/kvserver/kvstorage/init.go:280 ⋮ [T1,Vsystem
 
 	// Verify the output ZIP contains a .parquet file.
 	verifyParquetZip(t, outputPath, "nodes/1/logs/cockroach.parquet", 3)
+}
+
+func TestConvertStream(t *testing.T) {
+	tests := []struct {
+		name       string
+		format     string
+		input      string
+		wantRows   int
+		wantMalformed int64
+	}{
+		{
+			name:   "crdb-v2 explicit format",
+			format: "crdb-v2",
+			input: "I260128 07:00:20.057233 711 util/log/file_sync_buffer.go:237 ⋮ [T1,config] 1  first entry\n" +
+				"W260128 07:00:20.057234 712 util/log/file_sync_buffer.go:238 ⋮ [T1,config] 2  second entry\n",
+			wantRows: 2,
+		},
+		{
+			name:   "crdb-v1 explicit format",
+			format: "crdb-v1",
+			input:  "I210116 21:49:17.073282 14 server/node.go:464  [n1] hello v1\n",
+			wantRows: 1,
+		},
+		{
+			name:   "json explicit format",
+			format: "json",
+			input: `{"channel_numeric":1,"timestamp":"1610833757.080706620","severity_numeric":1,"goroutine":14,"file":"server/node.go","line":464,"message":"hello json"}` + "\n" +
+				`{"channel_numeric":2,"timestamp":"1610833757.080706621","severity_numeric":2,"goroutine":15,"file":"server/node.go","line":465,"message":"second json"}` + "\n",
+			wantRows: 2,
+		},
+		{
+			name:   "json-compact explicit format",
+			format: "json-compact",
+			input:  `{"c":1,"t":"1610833757.080706620","s":1,"g":14,"f":"server/node.go","l":464,"message":"compact"}` + "\n",
+			wantRows: 1,
+		},
+		{
+			name: "auto-detect crdb-v2 with header",
+			input: "I260128 07:00:19.211137 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] log format (utf8=✓): crdb-v2\n" +
+				"I260128 07:00:19.211138 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] line format: [IWEF]yymmdd hh:mm:ss.uuuuuu goid [chan@]file:line redactionmark \\[tags\\] [counter] msg\n" +
+				"W260128 07:00:19.211004 1 1@cli/start.go:1479 ⋮ [T1,n?] 1  ALL SECURITY CONTROLS HAVE BEEN DISABLED!\n",
+			wantRows: 1,
+		},
+		{
+			name:   "auto-detect fallback to v2",
+			input:  "I260128 07:00:20.057233 711 util/log/file_sync_buffer.go:237 ⋮ [T1,config] 1  no header\n",
+			wantRows: 1,
+		},
+		{
+			name:   "crdb-v1 multiple entries",
+			format: "crdb-v1",
+			input: "I210116 21:49:17.073282 14 server/node.go:464  [n1] first v1\n" +
+				"W210116 21:49:17.073283 15 server/node.go:465  [n1] second v1\n",
+			wantRows: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tr := &Transcoder{}
+			stats, err := tr.ConvertStream(context.Background(), strings.NewReader(tt.input), &buf, tt.format)
+			if err != nil {
+				t.Fatalf("ConvertStream: %v", err)
+			}
+
+			if stats.TotalEntries != int64(tt.wantRows) {
+				t.Errorf("TotalEntries = %d, want %d", stats.TotalEntries, tt.wantRows)
+			}
+			if stats.FilesProcessed != 1 {
+				t.Errorf("FilesProcessed = %d, want 1", stats.FilesProcessed)
+			}
+			if stats.MalformedLines != tt.wantMalformed {
+				t.Errorf("MalformedLines = %d, want %d", stats.MalformedLines, tt.wantMalformed)
+			}
+
+			verifyParquetBytes(t, buf.Bytes(), tt.wantRows)
+		})
+	}
+}
+
+func TestConvertStreamEmptyInput(t *testing.T) {
+	var buf bytes.Buffer
+	tr := &Transcoder{}
+	_, err := tr.ConvertStream(context.Background(), strings.NewReader(""), &buf, "crdb-v2")
+	if err != nil {
+		t.Fatalf("ConvertStream on empty input: %v", err)
+	}
+}
+
+func TestConvertStreamCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var buf bytes.Buffer
+	tr := &Transcoder{}
+	input := "I260128 07:00:20.057233 711 util/log/file_sync_buffer.go:237 ⋮ [T1,config] 1  entry\n"
+	_, err := tr.ConvertStream(ctx, strings.NewReader(input), &buf, "crdb-v2")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+func TestConvertStreamBatching(t *testing.T) {
+	var sb strings.Builder
+	for i := range 50 {
+		fmt.Fprintf(&sb, `{"channel_numeric":1,"timestamp":"1610833757.%09d","severity_numeric":1,"goroutine":14,"file":"server/node.go","line":464,"message":"entry %d"}`+"\n", i, i)
+	}
+
+	var buf bytes.Buffer
+	tr := &Transcoder{BatchSize: 10}
+	stats, err := tr.ConvertStream(context.Background(), strings.NewReader(sb.String()), &buf, "json")
+	if err != nil {
+		t.Fatalf("ConvertStream: %v", err)
+	}
+	if stats.TotalEntries != 50 {
+		t.Errorf("TotalEntries = %d, want 50", stats.TotalEntries)
+	}
+	verifyParquetBytes(t, buf.Bytes(), 50)
+}
+
+func verifyParquetBytes(t *testing.T, data []byte, expectedRows int) {
+	t.Helper()
+	if len(data) == 0 {
+		if expectedRows == 0 {
+			return
+		}
+		t.Fatal("parquet output is empty")
+	}
+	pf, err := parquet.OpenFile(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("opening parquet data: %v", err)
+	}
+	totalRows := 0
+	for _, rg := range pf.RowGroups() {
+		totalRows += int(rg.NumRows())
+	}
+	if totalRows != expectedRows {
+		t.Errorf("parquet rows: got %d, want %d", totalRows, expectedRows)
+	}
 }
 
 func TestConvertZIPWithRealBundle(t *testing.T) {

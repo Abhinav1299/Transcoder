@@ -17,6 +17,8 @@ artifacts/
 debugzips/
 outputs/
 notes.txt
+parquet-output/
+demo-upload-server
 
 # DuckDB verification scratch space
 /tmp/

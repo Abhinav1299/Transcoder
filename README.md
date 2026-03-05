@@ -70,6 +70,50 @@ WHERE severity >= 3
 ORDER BY time;
 ```
 
+## Streaming API
+
+In addition to ZIP-to-ZIP conversion, the package exposes a `ConvertStream` method for converting a text log stream directly to Parquet. This is designed for use by an upload server in a synchronous flow where CockroachDB streams logs over the network.
+
+```go
+tc := &transcoder.Transcoder{}
+stats, err := tc.ConvertStream(ctx, logReader, parquetWriter, "crdb-v2")
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `ctx` | `context.Context` | Controls cancellation |
+| `r` | `io.Reader` | Incoming text log stream |
+| `w` | `io.Writer` | Parquet output destination |
+| `format` | `string` | Log format (`"crdb-v2"`, `"crdb-v1"`, `"json"`, `"json-compact"`); empty string triggers auto-detection |
+
+Returns `*Stats` with `TotalEntries`, `MalformedLines`, and `FilesProcessed` (always 1 for a single stream).
+
+### Demo upload server
+
+A working example lives in `cmd/demo-upload-server/`. It runs an HTTP server that accepts POST requests with text logs in the body and converts them to Parquet on the fly.
+
+```bash
+# Start the server
+go run ./cmd/demo-upload-server/
+
+# Send logs (one-shot)
+curl -X POST http://localhost:8080/upload \
+  -H "X-Log-Format: crdb-v2" \
+  --data-binary @cockroach.log
+
+# Stream logs from a pipe
+cat cockroach.log | curl -X POST http://localhost:8080/upload \
+  -H "X-Log-Format: crdb-v2" \
+  -H "Transfer-Encoding: chunked" \
+  -T -
+```
+
+The server writes Parquet files to a `parquet-output/` directory and returns a JSON response with conversion stats:
+
+```json
+{"parquet_file":"parquet-output/upload-1772638013-1.parquet","total_entries":4,"malformed_lines":0}
+```
+
 ## Testing
 
 ```bash

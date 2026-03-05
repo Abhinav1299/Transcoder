@@ -16,7 +16,7 @@ import (
 // usage while keeping write I/O efficient.
 const defaultBatchSize = 10_000
 
-// Stats holds conversion metrics returned by ConvertZIP.
+// Stats holds conversion metrics returned by ConvertZIP and ConvertStream.
 type Stats struct {
 	FilesProcessed int
 	TotalEntries   int64
@@ -24,9 +24,9 @@ type Stats struct {
 	Errors         []error
 }
 
-// Transcoder converts CockroachDB debug-bundle log files from a ZIP archive
-// into Parquet format, producing an output ZIP with matching directory structure.
-// Non-log files are copied through unchanged.
+// Transcoder converts CockroachDB log files into Parquet format. It supports
+// two modes: ZIP-to-ZIP via ConvertZIP (for debug bundles) and stream-to-stream
+// via ConvertStream (for real-time log ingestion by an upload server).
 type Transcoder struct {
 	// BatchSize controls how many entries are buffered before each write.
 	// Zero uses defaultBatchSize.
@@ -105,9 +105,75 @@ func (t *Transcoder) ConvertZIP(ctx context.Context, inputPath, outputPath strin
 	return stats, nil
 }
 
+// ConvertStream reads text log entries from r, converts them to Parquet, and
+// writes the Parquet output to w. The format parameter specifies the log format
+// (e.g. "crdb-v2", "crdb-v1", "json"); an empty string triggers auto-detection
+// from the stream header.
+//
+// This is the core conversion API intended for use by an upload server in a
+// synchronous flow where logs are streamed directly (not wrapped in a ZIP).
+// ConvertZIP delegates to this method internally for each log file.
+func (t *Transcoder) ConvertStream(ctx context.Context, r io.Reader, w io.Writer, format string) (*Stats, error) {
+	stats := &Stats{}
+
+	decoder, err := NewEntryDecoderWithFormat(r, format)
+	if err != nil {
+		return stats, fmt.Errorf("creating decoder: %w", err)
+	}
+
+	pw := NewParquetWriter(w)
+
+	batchSize := t.batchSize()
+	batch := make([]LogEntry, 0, batchSize)
+
+	var entry LogEntry
+	for {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+
+		entry = LogEntry{}
+		decErr := decoder.Decode(&entry)
+		if decErr == io.EOF {
+			break
+		}
+		if decErr != nil {
+			stats.MalformedLines++
+			continue
+		}
+		if entry.Severity == SeverityUnknown && entry.Time == 0 {
+			stats.MalformedLines++
+			continue
+		}
+
+		batch = append(batch, entry)
+		stats.TotalEntries++
+
+		if len(batch) >= batchSize {
+			if wErr := pw.WriteEntries(batch); wErr != nil {
+				return stats, fmt.Errorf("writing parquet batch: %w", wErr)
+			}
+			batch = batch[:0]
+		}
+	}
+
+	if len(batch) > 0 {
+		if wErr := pw.WriteEntries(batch); wErr != nil {
+			return stats, fmt.Errorf("writing final parquet batch: %w", wErr)
+		}
+	}
+
+	if cErr := pw.Close(); cErr != nil {
+		return stats, fmt.Errorf("closing parquet writer: %w", cErr)
+	}
+
+	stats.FilesProcessed = 1
+	return stats, nil
+}
+
 // convertSingleFile parses one .log ZIP entry and writes its Parquet
-// equivalent into the output ZIP. The log format is auto-detected from
-// the file header via NewEntryDecoder.
+// equivalent into the output ZIP. It delegates to ConvertStream for the
+// actual decode-and-write logic.
 func (t *Transcoder) convertSingleFile(
 	ctx context.Context, zf *zip.File, outZip *zip.Writer, parquetName string,
 ) (entryCount int64, malformed int64, err error) {
@@ -122,58 +188,11 @@ func (t *Transcoder) convertSingleFile(
 		return 0, 0, fmt.Errorf("creating parquet entry in zip: %w", err)
 	}
 
-	pw := NewParquetWriter(w)
-
-	decoder, err := NewEntryDecoder(rc)
+	stats, err := t.ConvertStream(ctx, rc, w, "")
 	if err != nil {
-		return 0, 0, fmt.Errorf("creating decoder: %w", err)
+		return stats.TotalEntries, stats.MalformedLines, err
 	}
-
-	batchSize := t.batchSize()
-	batch := make([]LogEntry, 0, batchSize)
-
-	var entry LogEntry
-	for {
-		if err := ctx.Err(); err != nil {
-			return entryCount, malformed, err
-		}
-
-		entry = LogEntry{}
-		decErr := decoder.Decode(&entry)
-		if decErr == io.EOF {
-			break
-		}
-		if decErr != nil {
-			malformed++
-			continue
-		}
-		if entry.Severity == SeverityUnknown && entry.Time == 0 {
-			malformed++
-			continue
-		}
-
-		batch = append(batch, entry)
-		entryCount++
-
-		if len(batch) >= batchSize {
-			if wErr := pw.WriteEntries(batch); wErr != nil {
-				return entryCount, malformed, fmt.Errorf("writing parquet batch: %w", wErr)
-			}
-			batch = batch[:0]
-		}
-	}
-
-	if len(batch) > 0 {
-		if wErr := pw.WriteEntries(batch); wErr != nil {
-			return entryCount, malformed, fmt.Errorf("writing final parquet batch: %w", wErr)
-		}
-	}
-
-	if cErr := pw.Close(); cErr != nil {
-		return entryCount, malformed, fmt.Errorf("closing parquet writer: %w", cErr)
-	}
-
-	return entryCount, malformed, nil
+	return stats.TotalEntries, stats.MalformedLines, nil
 }
 
 func (t *Transcoder) batchSize() int {
