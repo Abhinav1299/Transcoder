@@ -1,4 +1,4 @@
-.PHONY: build test lint bench verify clean
+.PHONY: build test lint bench verify check-drift clean
 
 GO ?= go
 
@@ -25,6 +25,9 @@ verify: build
 	@duckdb < scripts/verify.sql
 	@rm -rf /tmp/verify
 
+check-drift:
+	@./scripts/check-proto-drift.sh $(or $(CRDB_REF),master)
+
 clean:
-	rm -f transcoder transcoder_test_bin
+	rm -f transcoder transcoder_test_bin transcoder-bin
 	rm -rf outputs1 /tmp/verify

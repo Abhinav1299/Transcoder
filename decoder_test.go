@@ -53,7 +53,7 @@ func TestNewEntryDecoderWithFormat(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dec, err := NewEntryDecoderWithFormat(strings.NewReader(tt.input), tt.format)
+			dec, _, err := NewEntryDecoderWithFormat(strings.NewReader(tt.input), tt.format)
 			if err != nil {
 				t.Fatalf("NewEntryDecoderWithFormat(%q): %v", tt.format, err)
 			}
@@ -69,7 +69,7 @@ func TestNewEntryDecoderWithFormat(t *testing.T) {
 }
 
 func TestNewEntryDecoderUnknownFormat(t *testing.T) {
-	_, err := NewEntryDecoderWithFormat(strings.NewReader(""), "bogus-format")
+	_, _, err := NewEntryDecoderWithFormat(strings.NewReader(""), "bogus-format")
 	if err == nil {
 		t.Fatal("expected error for unknown format")
 	}
@@ -145,5 +145,80 @@ func TestNewEntryDecoderEmptyInput(t *testing.T) {
 	_, err := NewEntryDecoder(strings.NewReader(""))
 	if err == nil {
 		t.Fatal("expected error for empty input")
+	}
+}
+
+func TestExtractCRDBVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "standard release",
+			data: "I260302 12:17:37.955400 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] binary: CockroachDB CCL v26.2.0-alpha.1-dev (darwin arm64, built , go1.25.5)\n",
+			want: "v26.2.0-alpha.1-dev",
+		},
+		{
+			name: "stable release",
+			data: "I240101 00:00:00.000000 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] binary: CockroachDB CCL v24.1.0 (linux amd64, built 2024-05-20, go1.22.3)\n",
+			want: "v24.1.0",
+		},
+		{
+			name: "no binary line",
+			data: "I260302 12:17:37.955393 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] file created at: 2026/03/02 12:17:37\n",
+			want: "",
+		},
+		{
+			name: "empty data",
+			data: "",
+			want: "",
+		},
+		{
+			name: "full header with version in context",
+			data: "I260302 12:17:37.955393 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] file created at: 2026/03/02 12:17:37\n" +
+				"I260302 12:17:37.955396 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] running on machine: test-host\n" +
+				"I260302 12:17:37.955400 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] binary: CockroachDB CCL v23.1.22 (linux amd64, built 2024-03-15, go1.21.6)\n" +
+				"I260302 12:17:37.955406 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] log format (utf8=✓): crdb-v2\n",
+			want: "v23.1.22",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractCRDBVersion([]byte(tt.data))
+			if got != tt.want {
+				t.Errorf("ExtractCRDBVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewEntryDecoderWithFormatReturnsVersion(t *testing.T) {
+	header := "I260302 12:17:37.955393 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] file created at: 2026/03/02 12:17:37\n" +
+		"I260302 12:17:37.955396 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] running on machine: test-host\n" +
+		"I260302 12:17:37.955400 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] binary: CockroachDB CCL v26.2.0-alpha.1-dev (darwin arm64, built , go1.25.5)\n" +
+		"I260302 12:17:37.955406 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] log format (utf8=✓): crdb-v2\n" +
+		"I260302 12:17:37.955407 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] line format: [IWEF]yymmdd hh:mm:ss.uuuuuu goid [chan@]file:line redactionmark \\[tags\\] [counter] msg\n" +
+		"W260302 12:17:37.955264 1 1@cli/start.go:1479 ⋮ [T1,n?] 1  ALL SECURITY CONTROLS HAVE BEEN DISABLED!\n"
+
+	_, version, err := NewEntryDecoderWithFormat(strings.NewReader(header), "")
+	if err != nil {
+		t.Fatalf("NewEntryDecoderWithFormat: %v", err)
+	}
+	if version != "v26.2.0-alpha.1-dev" {
+		t.Errorf("version = %q, want %q", version, "v26.2.0-alpha.1-dev")
+	}
+}
+
+func TestNewEntryDecoderWithFormatExplicitNoVersion(t *testing.T) {
+	input := "I260128 07:00:20.057233 711 util/log/file_sync_buffer.go:237 ⋮ [T1,config] 1  hello\n"
+
+	_, version, err := NewEntryDecoderWithFormat(strings.NewReader(input), "crdb-v2")
+	if err != nil {
+		t.Fatalf("NewEntryDecoderWithFormat: %v", err)
+	}
+	if version != "" {
+		t.Errorf("version = %q, want empty (explicit format skips header reading)", version)
 	}
 }

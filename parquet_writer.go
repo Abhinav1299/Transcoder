@@ -15,13 +15,19 @@ type ParquetWriter struct {
 }
 
 // NewParquetWriter returns a writer that encodes LogEntry records as Parquet
-// to the supplied io.Writer. The caller must call Close to flush buffered
-// rows and finalise the file footer.
-func NewParquetWriter(w io.Writer) *ParquetWriter {
-	pw := parquet.NewGenericWriter[LogEntry](w,
+// to the supplied io.Writer. When crdbVersion is non-empty, it is stored as
+// a "crdb_version" key-value pair in the Parquet file metadata, allowing
+// downstream consumers to identify which CockroachDB version produced the logs.
+// The caller must call Close to flush buffered rows and finalise the file footer.
+func NewParquetWriter(w io.Writer, crdbVersion string) *ParquetWriter {
+	opts := []parquet.WriterOption{
 		parquet.Compression(&parquet.Zstd),
 		parquet.MaxRowsPerRowGroup(10_000),
-	)
+	}
+	if crdbVersion != "" {
+		opts = append(opts, parquet.KeyValueMetadata("crdb_version", crdbVersion))
+	}
+	pw := parquet.NewGenericWriter[LogEntry](w, opts...)
 	return &ParquetWriter{writer: pw}
 }
 

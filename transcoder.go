@@ -110,18 +110,22 @@ func (t *Transcoder) ConvertZIP(ctx context.Context, inputPath, outputPath strin
 // (e.g. "crdb-v2", "crdb-v1", "json"); an empty string triggers auto-detection
 // from the stream header.
 //
+// When the log file header contains a CockroachDB version (the "binary:" line),
+// it is extracted and stored as "crdb_version" key-value metadata in the Parquet
+// file, enabling downstream consumers to identify the source CRDB version.
+//
 // This is the core conversion API intended for use by an upload server in a
 // synchronous flow where logs are streamed directly (not wrapped in a ZIP).
 // ConvertZIP delegates to this method internally for each log file.
 func (t *Transcoder) ConvertStream(ctx context.Context, r io.Reader, w io.Writer, format string) (*Stats, error) {
 	stats := &Stats{}
 
-	decoder, err := NewEntryDecoderWithFormat(r, format)
+	decoder, crdbVersion, err := NewEntryDecoderWithFormat(r, format)
 	if err != nil {
 		return stats, fmt.Errorf("creating decoder: %w", err)
 	}
 
-	pw := NewParquetWriter(w)
+	pw := NewParquetWriter(w, crdbVersion)
 
 	batchSize := t.batchSize()
 	batch := make([]LogEntry, 0, batchSize)

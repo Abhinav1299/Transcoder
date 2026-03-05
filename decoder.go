@@ -40,6 +40,11 @@ var (
 		`(?m)^` + `(?:.*"config".+log format \(utf8=.+\): )json-fluent".+$`)
 	jsonFluentCompactIndicatorRE = regexp.MustCompile(
 		`(?m)^` + `(?:.*"config".+log format \(utf8=.+\): )json-fluent-compact".+$`)
+
+	// binaryVersionRE extracts the CockroachDB version from the "binary:" header line
+	// present at the top of every log file. Example line (after debug-zip transcoding):
+	//   I260302 12:17:37.955400 1 ... ⋮ [T1,config] binary: CockroachDB CCL v26.2.0-alpha.1-dev (darwin arm64, built , go1.25.5)
+	binaryVersionRE = regexp.MustCompile(`(?m)binary: CockroachDB.*? (v\d+\.\d+\.\d+\S*)`)
 )
 
 // FormatParsers maps user-facing format names to the canonical internal names
@@ -64,30 +69,53 @@ var (
 	ErrMalformedEntry   = errors.New("malformed log entry")
 )
 
+// ExtractCRDBVersion extracts the CockroachDB version string from log file
+// header bytes. Every CockroachDB log file (all formats) includes a "binary:"
+// header line, e.g.:
+//
+//	binary: CockroachDB CCL v26.2.0-alpha.1-dev (darwin arm64, built , go1.25.5)
+//
+// Returns the version (e.g. "v26.2.0-alpha.1-dev") or "" if not found.
+func ExtractCRDBVersion(data []byte) string {
+	if m := binaryVersionRE.FindSubmatch(data); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
 // NewEntryDecoder creates an EntryDecoder by auto-detecting the log format
 // from the file header. If detection fails (e.g. no header present), it falls
 // back to crdb-v2. This mirrors log.NewEntryDecoder in the cockroach repo.
 func NewEntryDecoder(in io.Reader) (EntryDecoder, error) {
-	return NewEntryDecoderWithFormat(in, "")
+	dec, _, err := NewEntryDecoderWithFormat(in, "")
+	return dec, err
 }
 
 // NewEntryDecoderWithFormat creates an EntryDecoder for the given format.
 // When format is empty, it is auto-detected from the log file header.
 //
+// The returned crdbVersion is the CockroachDB version extracted from the
+// "binary:" header line (e.g. "v26.2.0-alpha.1-dev"), or "" if not found.
+// When an explicit format is provided, header reading is skipped and the
+// version will be empty.
+//
 // Debug zips created by `cockroach debug zip` transcode all log formats into
 // crdb-v1 text, but the header still declares the original format (e.g. "json").
 // When the declared format is JSON but the actual content is text, we fall back
 // to the v1 decoder.
-func NewEntryDecoderWithFormat(in io.Reader, format string) (EntryDecoder, error) {
+func NewEntryDecoderWithFormat(in io.Reader, format string) (EntryDecoder, string, error) {
 	var headerData []byte
 	if format == "" {
 		read, detectedFormat, err := ReadFormatFromLogFile(in)
 		if err != nil {
 			if err == io.EOF {
-				return nil, ErrEmptyLogFile
+				return nil, "", ErrEmptyLogFile
 			}
 			format = "crdb-v2"
 			if read != nil {
+				if buf, ok := read.(*bytes.Buffer); ok {
+					headerData = buf.Bytes()
+				}
 				in = io.MultiReader(read, in)
 			}
 		} else {
@@ -99,9 +127,11 @@ func NewEntryDecoderWithFormat(in io.Reader, format string) (EntryDecoder, error
 		}
 	}
 
+	crdbVersion := ExtractCRDBVersion(headerData)
+
 	canonical, ok := FormatParsers[format]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s", ErrUnknownFormat, format)
+		return nil, crdbVersion, fmt.Errorf("%w: %s", ErrUnknownFormat, format)
 	}
 
 	// Debug zips transcode JSON logs into crdb-v1 text. Detect this by
@@ -114,15 +144,15 @@ func NewEntryDecoderWithFormat(in io.Reader, format string) (EntryDecoder, error
 
 	switch canonical {
 	case "v2":
-		return newDecoderV2(in), nil
+		return newDecoderV2(in), crdbVersion, nil
 	case "v1":
-		return newDecoderV1(in), nil
+		return newDecoderV1(in), crdbVersion, nil
 	case "json":
-		return newDecoderJSON(in, false), nil
+		return newDecoderJSON(in, false), crdbVersion, nil
 	case "json-compact":
-		return newDecoderJSON(in, true), nil
+		return newDecoderJSON(in, true), crdbVersion, nil
 	default:
-		return nil, fmt.Errorf("%w: %s", ErrUnknownFormat, format)
+		return nil, crdbVersion, fmt.Errorf("%w: %s", ErrUnknownFormat, format)
 	}
 }
 

@@ -125,6 +125,40 @@ func TestConvertStream(t *testing.T) {
 	}
 }
 
+func TestConvertStreamParquetMetadata(t *testing.T) {
+	input := "I260302 12:17:37.955393 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] file created at: 2026/03/02 12:17:37\n" +
+		"I260302 12:17:37.955400 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] binary: CockroachDB CCL v26.2.0-alpha.1-dev (darwin arm64, built , go1.25.5)\n" +
+		"I260302 12:17:37.955406 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] log format (utf8=✓): crdb-v2\n" +
+		"I260302 12:17:37.955407 1 util/log/file_sync_buffer.go:237 ⋮ [T1,config] line format: [IWEF]yymmdd hh:mm:ss.uuuuuu goid [chan@]file:line redactionmark \\[tags\\] [counter] msg\n" +
+		"W260302 12:17:37.955264 1 1@cli/start.go:1479 ⋮ [T1,n?] 1  test entry\n"
+
+	var buf bytes.Buffer
+	tr := &Transcoder{}
+	_, err := tr.ConvertStream(context.Background(), strings.NewReader(input), &buf, "")
+	if err != nil {
+		t.Fatalf("ConvertStream: %v", err)
+	}
+
+	pf, err := parquet.OpenFile(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("opening parquet: %v", err)
+	}
+
+	found := false
+	for _, kv := range pf.Metadata().KeyValueMetadata {
+		if kv.Key == "crdb_version" {
+			found = true
+			if kv.Value != "v26.2.0-alpha.1-dev" {
+				t.Errorf("crdb_version = %q, want %q", kv.Value, "v26.2.0-alpha.1-dev")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("crdb_version key not found in parquet file metadata")
+	}
+}
+
 func TestConvertStreamEmptyInput(t *testing.T) {
 	var buf bytes.Buffer
 	tr := &Transcoder{}

@@ -1,8 +1,25 @@
 package transcoder
 
 // LogEntry mirrors the cockroach.util.log.Entry protobuf message defined in
-// log.proto. The parquet struct tags drive automatic schema generation by
-// parquet-go's GenericWriter.
+// log.proto (https://github.com/cockroachdb/cockroach/blob/master/pkg/util/log/logpb/log.proto).
+// The parquet struct tags drive automatic schema generation by parquet-go's
+// GenericWriter.
+//
+// Versioning strategy: this struct uses a "superset" approach — it contains the
+// union of all Entry fields across all supported CockroachDB versions. When
+// parsing logs from older CRDB versions, fields that did not exist in that
+// version will have their Go zero value (e.g., "" for strings, 0 for integers).
+// This works because:
+//
+//   - Protobuf schemas are additive-only: fields are never removed, and field
+//     numbers are stable across versions.
+//   - Changes to Entry are very infrequent (~1 field per major release cycle).
+//   - Zero values are semantically correct for absent fields.
+//
+// When CockroachDB adds a new field to Entry, add it here with the matching
+// parquet tag and release a new transcoder version. The CI script
+// scripts/check-proto-drift.sh detects when upstream fields diverge from this
+// struct.
 type LogEntry struct {
 	Severity        int32  `parquet:"severity"`
 	Time            int64  `parquet:"time"`
