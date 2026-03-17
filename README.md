@@ -1,6 +1,6 @@
 # transcoder
 
-`transcoder` converts [CockroachDB](https://github.com/cockroachdb/cockroach) debug-bundle log files from plain-text into [Apache Parquet](https://parquet.apache.org/), making them queryable with tools like DuckDB, Spark, and pandas.
+`transcoder` converts [CockroachDB](https://github.com/cockroachdb/cockroach) debug-bundle log files from plain-text into [Apache Parquet](https://parquet.apache.org/), making them queryable with tools like DuckDB, Spark, and pandas. It also decodes encoded columns in table dump files (`.txt` TSV) within the debug bundle, producing human-readable output.
 
 ## Features
 
@@ -8,6 +8,7 @@
 - Reassembles multi-line entries (continuation markers `+`, `|`, `!`) and attaches non-matching banner lines to their preceding entry.
 - Sanitises invalid UTF-8 bytes so the output is always valid Parquet.
 - Streams log files line-by-line — memory usage stays bounded regardless of file size.
+- Decodes encoded table dump columns (protobuf, UUID, region, key) into readable formats — see [Table Dump Decoding](#table-dump-decoding).
 - Copies non-log files (goroutine dumps, node status, etc.) through to the output ZIP unchanged.
 
 
@@ -43,7 +44,7 @@ go build -o transcoder ./cmd/transcoder
 | `-input` | *(required)* | Path to a CockroachDB debug-bundle ZIP |
 | `-output` | `parquet.zip` | Path for the output ZIP |
 
-The output ZIP mirrors the input directory structure. Every `*.log` file is replaced with a corresponding `.parquet` file; all other files are preserved as-is.
+The output ZIP mirrors the input directory structure. Every `*.log` file is replaced with a corresponding `.parquet` file, table dumps with encoded columns are decoded in-place, and all other files are preserved as-is.
 
 ### Example
 
@@ -113,6 +114,80 @@ The server writes Parquet files to a `parquet-output/` directory and returns a J
 ```json
 {"parquet_file":"parquet-output/upload-1772638013-1.parquet","total_entries":4,"malformed_lines":0}
 ```
+
+## Table Dump Decoding
+
+CockroachDB debug bundles contain table dump files (`.txt`, tab-separated) where some columns are stored in encoded form — hex-encoded protobufs, value-encoded UUIDs, or sentinel byte values. The `tabledecoder` package decodes these columns into human-readable output automatically during `ConvertZIP`.
+
+### What gets decoded
+
+The table registry (`tabledecoder/registry.go`) mirrors CRDB's `clusterWideTableDumps` and `nodeSpecificTableDumps` from `pkg/cli/zip_upload_table_dumps.go`. It covers 95 tables (68 cluster-wide, 27 node-specific), of which 17 have columns requiring decoding:
+
+| Decoder | Columns | Tables |
+|---------|---------|--------|
+| **Proto → JSON** | `descriptor`, `progress`, `info`, `schedule_state`, `schedule_details`, `execution_args`, `total_consumption`, `current_rates`, `next_rates`, `config` | `system.descriptor`, `crdb_internal.system_jobs`, `system.tenants`, `system.scheduled_jobs`, `system.tenant_usage`, `system.span_configurations` |
+| **UUID** | `session_id`, `fingerprint_id`, `transaction_fingerprint_id`, `plan_hash`, `uniqueID`, `txn_fingerprint_id`, `stmt_fingerprint_id`, `blocking_txn_fingerprint_id`, `waiting_*_fingerprint_id` | `system.sqlliveness`, `system.lease`, `system.sql_instances`, `system.eventlog`, `system.statement_statistics_limit_5000`, `crdb_internal.transaction_contention_events`, `crdb_internal.node_*_insights`, `crdb_internal.kv_session_based_leases` |
+| **Region** | `crdb_region` (`\x80` sentinel → `NULL`) | `system.sqlliveness`, `system.lease`, `crdb_internal.kv_session_based_leases` |
+| **Key** | `start_key`, `end_key` (hex → quoted bytes) | `system.span_configurations` |
+| **Skip** | `lock_key` (omitted; `lock_key_pretty` exists) | `crdb_internal.cluster_locks` |
+
+Columns not listed in the registry pass through unchanged. Tables not in the registry are copied as-is.
+
+### How it works
+
+1. **`ConvertZIP`** iterates over each file in the debug bundle. For `.txt` table dumps with registered decoders, it calls `tabledecoder.DecodeTSV`.
+2. **`DecodeTSV`** reads the TSV header row, builds a column action plan (decode / skip / passthrough), then processes each data row — applying the appropriate decoder to each cell and writing the result as a decoded TSV.
+3. **Proto decoding** uses `dynamicpb` with an embedded `FileDescriptorSet` (`descriptors.binpb`) compiled from CRDB's `.proto` files. This avoids any runtime dependency on the CRDB Go module. The proto bytes are deserialized into dynamic messages and marshaled to JSON via `protojson`, with a custom resolver for `google.protobuf.Any` fields.
+4. **UUID decoding** replicates CRDB's `encoding.DecodeUUIDValue([]byte(inp))` — parsing the CRDB value-encoding tag and extracting the 16-byte UUID payload.
+5. If decoding fails for any table, the original file is copied unchanged as a fallback.
+
+### Streaming API for table decoding
+
+In addition to ZIP-to-ZIP decoding via `ConvertZIP`, the `DecodeTableStream` method supports decoding individual table dumps in a streaming fashion — intended for upload servers where table dumps arrive as individual streams:
+
+```go
+tc := &transcoder.Transcoder{}
+decoded, err := tc.DecodeTableStream(rawTSVReader, decodedTSVWriter, "system.descriptor.txt")
+if !decoded {
+    // No decoders for this table — handle passthrough
+    io.Copy(decodedTSVWriter, rawTSVReader)
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `r` | `io.Reader` | Raw TSV table dump stream |
+| `w` | `io.Writer` | Decoded TSV output destination |
+| `tableName` | `string` | Table dump filename (e.g. `"system.descriptor.txt"`) for registry lookup |
+
+Returns `decoded=true` if decoders were applied, `false` if the table has no registered decoders (caller should passthrough). The `tabledecoder` package functions (`LookupTable`, `DecodeTSV`) are also available for direct use.
+
+### Example
+
+Given an original `system.descriptor.txt`:
+
+```
+id	descriptor
+1	\x12470a0673797374656d10011a250a0d0a0561646d696e...
+```
+
+The decoded output becomes:
+
+```
+id	descriptor
+1	{"database":{"name":"system","id":1,"privileges":{...}}}
+```
+
+### Regenerating proto descriptors
+
+The `descriptors.binpb` file is checked into the repository. To regenerate it (e.g. after a CRDB proto schema change):
+
+```bash
+# Requires: protoc, a local CockroachDB checkout
+CRDB_DIR=/path/to/cockroach ./scripts/gen-proto-descriptors.sh
+```
+
+This extracts the required `.proto` files from the CRDB tree, resolves external dependencies (`gogoproto`, `errorspb`) from the Go module cache, and compiles them into `tabledecoder/descriptors.binpb`. The CRDB checkout is only a build-time dependency — it is not imported as a Go module.
 
 ## Testing
 
