@@ -1,0 +1,25 @@
+syntax = "proto3";
+package tsdecoder;
+option go_package = "github.com/cockroachlabs/transcoder/tsdecoder";
+
+message InternalTimeSeriesData {
+  int64 start_timestamp_nanos = 1;
+  int64 sample_duration_nanos = 2;
+  repeated InternalTimeSeriesSample samples = 3;
+  repeated int32 offset = 4 [packed = true];
+  repeated double last = 5 [packed = true];
+  repeated uint32 count = 6 [packed = true];
+  repeated double sum = 7 [packed = true];
+  repeated double max = 8 [packed = true];
+  repeated double min = 9 [packed = true];
+  repeated double first = 10 [packed = true];
+  repeated double variance = 11 [packed = true];
+}
+
+message InternalTimeSeriesSample {
+  int32 offset = 1;
+  uint32 count = 6;
+  double sum = 7;
+  double max = 8;
+  double min = 9;
+}

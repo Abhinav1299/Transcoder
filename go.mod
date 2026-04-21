@@ -4,8 +4,8 @@ go 1.25.5
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/parquet-go/parquet-go v0.28.0
-	google.golang.org/protobuf v1.34.2
+	github.com/parquet-go/parquet-go v0.29.0
+	google.golang.org/protobuf v1.36.6
 )
 
 require (
