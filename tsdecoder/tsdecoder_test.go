@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/gob"
 	"io"
+	"strconv"
 	"testing"
 	"time"
 
@@ -26,30 +27,32 @@ func buildTestKey(metricName string, resolution, timeslot int64, source string) 
 // buildTestValue constructs a valid tsdump value with a protobuf
 // InternalTimeSeriesData payload using the columnar format.
 func buildTestValue(startNanos, sampleDurationNanos int64, offsets []int32, values []float64) []byte {
-	idata := &InternalTimeSeriesData{
+	return marshalITSD(&InternalTimeSeriesData{
 		StartTimestampNanos: startNanos,
 		SampleDurationNanos: sampleDurationNanos,
 		Offset:              offsets,
 		Last:                values,
-	}
-	protoBytes, err := proto.Marshal(idata)
-	if err != nil {
-		panic(err)
-	}
-	// Prepend the 5-byte header (4-byte checksum + 1-byte tag).
-	raw := make([]byte, headerSize+len(protoBytes))
-	copy(raw[headerSize:], protoBytes)
-	return raw
+	})
 }
 
 // buildTestValueRowFormat constructs a tsdump value using the legacy
 // row-based sample format.
 func buildTestValueRowFormat(startNanos, sampleDurationNanos int64, samples []*InternalTimeSeriesSample) []byte {
-	idata := &InternalTimeSeriesData{
+	return marshalITSD(&InternalTimeSeriesData{
 		StartTimestampNanos: startNanos,
 		SampleDurationNanos: sampleDurationNanos,
 		Samples:             samples,
-	}
+	})
+}
+
+// marshalITSD serializes the given InternalTimeSeriesData into the on-wire
+// layout that Convert expects in Value.RawBytes: a 5-byte CRDB value header
+// (unchecked checksum + tag) followed by the protobuf-encoded payload. Unlike
+// buildTestValue / buildTestValueRowFormat this accepts an arbitrary ITSD so
+// tests can construct intentionally malformed shapes (e.g. mismatched
+// columnar slice lengths, zero sample duration) that the specialized helpers
+// don't allow to express.
+func marshalITSD(idata *InternalTimeSeriesData) []byte {
 	protoBytes, err := proto.Marshal(idata)
 	if err != nil {
 		panic(err)
@@ -302,4 +305,131 @@ func readParquetRows(t *testing.T, data []byte) []Row {
 		t.Fatalf("reading parquet rows: %v", err)
 	}
 	return rows[:n]
+}
+
+// TestConvert_TimeRangeMetadata verifies that Convert records the observed
+// time window on Stats and writes it to the Parquet file-level KV metadata
+// where Grafana/DuckDB can find it without scanning data pages. It also
+// verifies an empty stream omits the time-range keys (to avoid claiming the
+// file covers the Unix epoch).
+func TestConvert_TimeRangeMetadata(t *testing.T) {
+	const sampleDuration = int64(10_000_000_000) // 10s
+
+	// Build three slabs across two metrics, spanning from 1_000s to 1_100s
+	// (in nanoseconds since epoch). The smallest and largest timestamps in
+	// the flattened rows are what the metadata should report.
+	firstStart := int64(1_000 * time.Second) // earliest slab
+	lastStart := int64(1_080 * time.Second)  // start of last slab
+
+	kvs := []KeyValue{
+		{
+			Key: buildTestKey("cr.node.a", 1, 100, "1"),
+			Value: Value{RawBytes: buildTestValue(firstStart, sampleDuration,
+				[]int32{0, 1, 2}, []float64{10, 20, 30})},
+		},
+		{
+			// Middle slab is fully contained within the outer range.
+			Key: buildTestKey("cr.node.a", 1, 100, "1"),
+			Value: Value{RawBytes: buildTestValue(firstStart+40*int64(time.Second), sampleDuration,
+				[]int32{0, 1}, []float64{40, 50})},
+		},
+		{
+			Key: buildTestKey("cr.node.b", 1, 100, "2"),
+			Value: Value{RawBytes: buildTestValue(lastStart, sampleDuration,
+				[]int32{0, 1, 2}, []float64{60, 70, 80})},
+		},
+	}
+
+	wantMin := firstStart + 0*sampleDuration
+	wantMax := lastStart + 2*sampleDuration
+
+	var out bytes.Buffer
+	stats, err := Convert(encodeGobStream(nil, kvs), &out, nil)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if stats.MinTimestamp != wantMin {
+		t.Errorf("stats.MinTimestamp = %d, want %d", stats.MinTimestamp, wantMin)
+	}
+	if stats.MaxTimestamp != wantMax {
+		t.Errorf("stats.MaxTimestamp = %d, want %d", stats.MaxTimestamp, wantMax)
+	}
+
+	f, err := parquet.OpenFile(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatalf("opening parquet: %v", err)
+	}
+
+	wantKVs := map[string]string{
+		MetaKeyRowCount:          strconv.Itoa(stats.RowsWritten),
+		MetaKeyMinTimestampNanos: strconv.FormatInt(wantMin, 10),
+		MetaKeyMaxTimestampNanos: strconv.FormatInt(wantMax, 10),
+		MetaKeyMinTimestamp:      time.Unix(0, wantMin).UTC().Format(time.RFC3339Nano),
+		MetaKeyMaxTimestamp:      time.Unix(0, wantMax).UTC().Format(time.RFC3339Nano),
+	}
+	for k, want := range wantKVs {
+		got, ok := f.Lookup(k)
+		if !ok {
+			t.Errorf("kv metadata %q missing", k)
+			continue
+		}
+		if got != want {
+			t.Errorf("kv metadata %q = %q, want %q", k, got, want)
+		}
+	}
+
+	// Sanity: the data rows themselves must still match the metadata
+	// range — otherwise the file would mislead downstream tools.
+	rows := readParquetRows(t, out.Bytes())
+	if len(rows) == 0 {
+		t.Fatal("no rows written")
+	}
+	var rowMin, rowMax int64 = rows[0].Timestamp, rows[0].Timestamp
+	for _, r := range rows[1:] {
+		if r.Timestamp < rowMin {
+			rowMin = r.Timestamp
+		}
+		if r.Timestamp > rowMax {
+			rowMax = r.Timestamp
+		}
+	}
+	if rowMin != wantMin || rowMax != wantMax {
+		t.Errorf("actual row range [%d,%d] does not match metadata [%d,%d]",
+			rowMin, rowMax, wantMin, wantMax)
+	}
+}
+
+// TestConvert_TimeRangeMetadata_EmptyStream verifies that a stream with no
+// samples does not claim to cover any time window (min/max keys absent) but
+// still carries the row_count metadata for callers that want to sanity-check
+// the file.
+func TestConvert_TimeRangeMetadata_EmptyStream(t *testing.T) {
+	var out bytes.Buffer
+	stats, err := Convert(encodeGobStream(nil, nil), &out, nil)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if stats.RowsWritten != 0 {
+		t.Fatalf("RowsWritten = %d, want 0", stats.RowsWritten)
+	}
+	if stats.MinTimestamp != 0 || stats.MaxTimestamp != 0 {
+		t.Errorf("min/max = %d/%d, want zero for empty stream",
+			stats.MinTimestamp, stats.MaxTimestamp)
+	}
+
+	f, err := parquet.OpenFile(bytes.NewReader(out.Bytes()), int64(out.Len()))
+	if err != nil {
+		t.Fatalf("opening parquet: %v", err)
+	}
+	if got, ok := f.Lookup(MetaKeyRowCount); !ok || got != "0" {
+		t.Errorf("row_count metadata = %q (present=%v), want \"0\"", got, ok)
+	}
+	for _, k := range []string{
+		MetaKeyMinTimestampNanos, MetaKeyMaxTimestampNanos,
+		MetaKeyMinTimestamp, MetaKeyMaxTimestamp,
+	} {
+		if got, ok := f.Lookup(k); ok {
+			t.Errorf("kv metadata %q = %q should be absent for empty stream", k, got)
+		}
+	}
 }
