@@ -73,7 +73,18 @@ func DecodeDataKey(key []byte) (name, source string, timestamp int64, err error)
 
 	// Remaining bytes are the source.
 	source = string(remainder)
-	name = strings.TrimPrefix(string(nameBytes), "cr.")
+
+	// Strip CRDB timeseries subsystem prefixes so metric names match the
+	// server-side metrics registry (e.g. "cr.node.sql.queries" -> "sql_queries",
+	// "cr.store.capacity" -> "capacity"). Order matters: the plain "cr." fallback
+	// must come last so more specific subsystem prefixes win.
+	name = string(nameBytes)
+	for _, prefix := range []string{"cr.node.", "cr.store.", "cr."} {
+		if strings.HasPrefix(name, prefix) {
+			name = name[len(prefix):]
+			break
+		}
+	}
 	name = strings.ReplaceAll(name, ".", "_")
 	return name, source, timestamp, nil
 }

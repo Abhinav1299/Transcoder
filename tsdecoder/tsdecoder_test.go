@@ -110,8 +110,8 @@ func TestConvert(t *testing.T) {
 			wantRows: 3,
 			check: func(t *testing.T, rows []Row) {
 				for i, row := range rows {
-					if row.Name != "node_sql_conns" {
-						t.Errorf("row[%d].Name = %q, want %q", i, row.Name, "node_sql_conns")
+					if row.Name != "sql_conns" {
+						t.Errorf("row[%d].Name = %q, want %q", i, row.Name, "sql_conns")
 					}
 					if row.Source != "1" {
 						t.Errorf("row[%d].Source = %q, want %q", i, row.Source, "1")
@@ -150,8 +150,8 @@ func TestConvert(t *testing.T) {
 			},
 			wantRows: 2,
 			check: func(t *testing.T, rows []Row) {
-				if rows[0].Name != "node_exec_count" {
-					t.Errorf("Name = %q, want %q", rows[0].Name, "node_exec_count")
+				if rows[0].Name != "exec_count" {
+					t.Errorf("Name = %q, want %q", rows[0].Name, "exec_count")
 				}
 				if rows[0].Value != 100.0 || rows[1].Value != 200.0 {
 					t.Errorf("Values = [%f, %f], want [100, 200]", rows[0].Value, rows[1].Value)
@@ -186,8 +186,8 @@ func TestConvert(t *testing.T) {
 				}
 			},
 			check: func(t *testing.T, rows []Row) {
-				if rows[0].Name != "node_live_nodes" {
-					t.Errorf("Name = %q, want %q", rows[0].Name, "node_live_nodes")
+				if rows[0].Name != "live_nodes" {
+					t.Errorf("Name = %q, want %q", rows[0].Name, "live_nodes")
 				}
 			},
 		},
@@ -223,12 +223,12 @@ func TestConvert(t *testing.T) {
 			wantRows: 4,
 			check: func(t *testing.T, rows []Row) {
 				for i := 0; i < 3; i++ {
-					if rows[i].Name != "node_metric_a" {
-						t.Errorf("row[%d].Name = %q, want %q", i, rows[i].Name, "node_metric_a")
+					if rows[i].Name != "metric_a" {
+						t.Errorf("row[%d].Name = %q, want %q", i, rows[i].Name, "metric_a")
 					}
 				}
-				if rows[3].Name != "node_metric_b" {
-					t.Errorf("row[3].Name = %q, want %q", rows[3].Name, "node_metric_b")
+				if rows[3].Name != "metric_b" {
+					t.Errorf("row[3].Name = %q, want %q", rows[3].Name, "metric_b")
 				}
 				if rows[3].Value != 99.0 {
 					t.Errorf("row[3].Value = %f, want 99.0", rows[3].Value)

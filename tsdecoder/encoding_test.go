@@ -324,7 +324,7 @@ func TestDecodeDataKey(t *testing.T) {
 		wantErr    bool
 	}{
 		{
-			name: "basic metric",
+			name: "cr.node. subsystem prefix is stripped",
 			buildKey: func() []byte {
 				var key []byte
 				key = append(key, timeseriesPrefix...)
@@ -334,11 +334,39 @@ func TestDecodeDataKey(t *testing.T) {
 				key = append(key, []byte("1")...) // source
 				return key
 			},
-			wantName:   "node_sql_conns",
+			wantName:   "sql_conns",
 			wantSource: "1",
 		},
 		{
-			name: "metric without cr. prefix",
+			name: "cr.store. subsystem prefix is stripped",
+			buildKey: func() []byte {
+				var key []byte
+				key = append(key, timeseriesPrefix...)
+				key = append(key, encodeBytes([]byte("cr.store.capacity.available"))...)
+				key = append(key, encodeVarint(1)...)
+				key = append(key, encodeVarint(100)...)
+				key = append(key, []byte("s1")...)
+				return key
+			},
+			wantName:   "capacity_available",
+			wantSource: "s1",
+		},
+		{
+			name: "unknown cr.* subsystem falls back to stripping cr.",
+			buildKey: func() []byte {
+				var key []byte
+				key = append(key, timeseriesPrefix...)
+				key = append(key, encodeBytes([]byte("cr.jobs.running"))...)
+				key = append(key, encodeVarint(1)...)
+				key = append(key, encodeVarint(100)...)
+				key = append(key, []byte("1")...)
+				return key
+			},
+			wantName:   "jobs_running",
+			wantSource: "1",
+		},
+		{
+			name: "metric without cr. prefix is left untouched",
 			buildKey: func() []byte {
 				var key []byte
 				key = append(key, timeseriesPrefix...)
